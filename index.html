@@ -155,6 +155,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--cream);b
 .item{display:grid;grid-template-columns:1fr 64px 84px 36px;gap:6px;align-items:center;margin-bottom:6px}
 .item input{padding:8px;min-height:40px}
 .item .hint{grid-column:1/-1;font-size:12px;margin:-2px 0 4px}
+.item .match{grid-column:1/-1;font-size:12px;margin:-2px 0 6px}
+.item .match:empty{display:none}
+.mchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.mchips button{border:1px solid var(--bg3);background:rgba(255,242,227,.08);color:#FFF2E3;border-radius:999px;padding:5px 10px;font-size:12px;cursor:pointer}
 .pc{display:grid;grid-template-columns:28px 1fr 1fr;gap:8px;align-items:center;margin-bottom:6px}
 .x{background:none;border:0;font-size:24px;line-height:1;color:var(--muted);cursor:pointer;padding:4px 8px}
 .x:hover{color:var(--cream)}
@@ -821,8 +825,60 @@ A.exportEntries = () => {
 };
 
 /* ---------- formulário de recebimento ---------- */
+
+/* ---------- vínculo de itens com produtos (sem duplicar) ---------- */
+const STOP = new Set(['de', 'da', 'do', 'das', 'dos', 'com', 'sem', 'e', 'a', 'o', 'em', 'para', 'un', 'und', 'unidade', 'kg', 'g', 'gr', 'pct', 'cx']);
+const toks = s => norm(s).replace(/[^a-z0-9]+/g, ' ').split(' ').filter(t => t && !STOP.has(t)).map(t => t.length > 3 && t.endsWith('s') ? t.slice(0, -1) : t);
+function lev(a, b) { const m = a.length, n = b.length; if (Math.abs(m - n) > 2) return 9; let prev = Array.from({ length: n + 1 }, (_, j) => j); for (let i = 1; i <= m; i++) { const cur = [i]; for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); prev = cur; } return prev[n]; }
+function tokMatch(a, b) { return a === b || (a.length >= 4 && b.length >= 4 && (a.startsWith(b) || b.startsWith(a))) || (a.length >= 5 && lev(a, b) <= 1); }
+function similarProducts(name, supplierId) {
+  const ta = toks(name), na = norm(name); if (!ta.length) return [];
+  const out = [];
+  S.data.products.forEach(p => {
+    if (p.active === false || norm(p.name) === na) return;
+    const tb = toks(p.name); if (!tb.length) return;
+    const hit = ta.filter(x => tb.some(y => tokMatch(x, y))).length;
+    const sub = hit / Math.min(ta.length, tb.length), jac = hit / (ta.length + tb.length - hit);
+    const typo = na.length >= 5 && lev(na, norm(p.name)) <= 2;
+    if (!(typo || (sub >= 0.999 && hit >= 1) || jac >= 0.5)) return;
+    out.push({ p, score: (typo ? 2 : 0) + jac + sub + (supplierId && p.supplierId === supplierId ? 0.5 : 0) });
+  });
+  return out.sort((a, b) => b.score - a.score).slice(0, 4).map(x => x.p);
+}
+function exactProduct(name, supplierId) {
+  const v = norm(name); if (!v) return null;
+  const c = S.data.products.filter(x => x.active !== false && (norm(x.name) === v || (x.code && norm(x.code) === v)));
+  return c.find(x => x.supplierId === supplierId) || c[0] || null;
+}
+function dlOptions(sid) {
+  const act = S.data.products.filter(p => p.active !== false).sort(byName), supName = id => (S.data.suppliers.find(s => s.id === id) || {}).name || '';
+  const mine = act.filter(p => sid && p.supplierId === sid), rest = act.filter(p => !(sid && p.supplierId === sid));
+  return mine.map(p => `<option value="${esc(p.name)}">${esc(p.code || 'deste fornecedor')}</option>`).join('') + rest.map(p => `<option value="${esc(p.name)}">${esc(supName(p.supplierId) || p.code || '')}</option>`).join('');
+}
+function updateMatch(row) {
+  const box = $('.match', row), name = $('.it-name', row).value.trim(); if (!box) return;
+  const sid = $('#e-sup') ? $('#e-sup').value : '', sup = S.data.suppliers.find(s => s.id === sid);
+  row.dataset.pending = '';
+  if (!name) { box.innerHTML = ''; return; }
+  const p = row.dataset.pid && S.data.products.find(x => x.id === row.dataset.pid);
+  if (p) { const other = p.supplierId && sid && p.supplierId !== sid ? (S.data.suppliers.find(s => s.id === p.supplierId) || {}).name : ''; box.innerHTML = `<small class="down">&#10003; Produto já cadastrado${other ? ' (de ' + esc(other) + ')' : ''}: atualiza custo e estoque dele</small>`; return; }
+  const sug = row.dataset.new === '1' ? [] : similarProducts(name, sid);
+  if (sug.length) {
+    row.dataset.pending = '1';
+    box.innerHTML = `<small class="up">Parece com produto já cadastrado. É o mesmo?</small><div class="mchips">${sug.map(x => `<button type="button" class="chip" data-act="pickProd" data-pid="${x.id}">${esc(x.name)}</button>`).join('')}<button type="button" class="chip" data-act="newProd">&#10010; É um produto novo</button></div>`;
+    return;
+  }
+  box.innerHTML = `<small class="muted">Produto novo: será cadastrado${sup ? ' em ' + esc(sup.name) : ''} (você define mínimo e preço depois)</small>`;
+}
+A.pickProd = el => {
+  const row = el.closest('.item'), p = S.data.products.find(x => x.id === el.dataset.pid); if (!row || !p) return;
+  $('.it-name', row).value = p.name; row.dataset.pid = p.id; row.dataset.new = '';
+  const c = $('.it-cost', row); if (!c.value && p.cost > 0) c.value = String(p.cost).replace('.', ',');
+  updateMatch(row); itemHint(row); updateItemSum();
+};
+A.newProd = el => { const row = el.closest('.item'); if (!row) return; row.dataset.new = '1'; updateMatch(row); };
 function itemRow(it = {}) {
-  return `<div class="item" data-pid="${esc(it.productId || '')}"><input class="it-name" list="dl-prod" placeholder="Produto" value="${esc(it.name || '')}" autocomplete="off"><input class="it-qty" inputmode="decimal" placeholder="Qtd" value="${it.qty ? String(it.qty).replace('.', ',') : ''}"><input class="it-cost" inputmode="decimal" placeholder="Custo un." value="${it.unitCost ? String(it.unitCost).replace('.', ',') : ''}"><button class="x" data-act="rmItem" aria-label="Remover item">&times;</button><div class="hint"></div></div>`;
+  return `<div class="item" data-pid="${esc(it.productId || '')}"><input class="it-name" list="dl-prod" placeholder="Produto" value="${esc(it.name || '')}" autocomplete="off"><input class="it-qty" inputmode="decimal" placeholder="Qtd" value="${it.qty ? String(it.qty).replace('.', ',') : ''}"><input class="it-cost" inputmode="decimal" placeholder="Custo un." value="${it.unitCost ? String(it.unitCost).replace('.', ',') : ''}"><button class="x" data-act="rmItem" aria-label="Remover item">&times;</button><div class="hint"></div><div class="match"></div></div>`;
 }
 function openEntryForm(ctx) {
   const e = ctx.entry, r = ctx.receipt, isEdit = !!e, sups = suppliersActive();
@@ -846,7 +902,7 @@ function openEntryForm(ctx) {
     ${isEdit ? (e.items?.length ? `<h3 style="margin-top:8px">Itens</h3><div class="list">${e.items.map(i => `<div class="it"><div class="main"><div class="t">${esc(i.name)}</div><div class="sub">${num(i.qty)} × ${brl(i.unitCost)}</div></div><div class="amt">${brl(i.qty * i.unitCost)}</div></div>`).join('')}</div>` : '') : `
     <div class="sec" style="margin-top:10px"><h3>Itens (opcional)</h3><button class="btn sec2 sm" data-act="addItem">${ico('plus')} Item</button></div>
     <small>Preencha para acompanhar variação de custo e margem por produto.</small>
-    <datalist id="dl-prod">${S.data.products.filter(p => p.active !== false).sort(byName).map(p => `<option value="${esc(p.name)}">${esc(p.code || '')}</option>`).join('')}</datalist>
+    <datalist id="dl-prod">${dlOptions(sid)}</datalist>
     <div id="e-items" style="margin-top:8px">${itemRow()}</div>
     <div class="sub" id="e-itemsum"></div>
     <label class="chk"><input type="checkbox" id="e-addstock"> Somar as quantidades ao estoque atual</label>`}
@@ -877,11 +933,11 @@ function itemHint(row) {
 }
 H.change.push(t => {
   if (t.classList.contains('it-name')) {
-    const row = t.closest('.item'), v = norm(t.value);
-    const p = S.data.products.find(x => norm(x.name) === v || (x.code && norm(x.code) === v));
-    row.dataset.pid = p ? p.id : '';
+    const row = t.closest('.item');
+    const p = exactProduct(t.value, $('#e-sup') ? $('#e-sup').value : '');
+    row.dataset.pid = p ? p.id : ''; row.dataset.new = '';
     if (p) { t.value = p.name; const c = $('.it-cost', row); if (!c.value && p.cost > 0) c.value = String(p.cost).replace('.', ','); }
-    itemHint(row); updateItemSum();
+    updateMatch(row); itemHint(row); updateItemSum();
   }
 });
 H.input.push(t => {
@@ -890,6 +946,7 @@ H.input.push(t => {
 });
 H.change.push(async t => {
   if (t.id === 'e-pay') $('#e-boleto').hidden = t.value !== 'boleto';
+  if (t.id === 'e-sup' && $('#dl-prod')) { $('#dl-prod').innerHTML = dlOptions(t.value); $$('#e-items .item').forEach(r => { if (!r.dataset.pid) r.dataset.new = ''; updateMatch(r); }); }
   if (t.id === 'e-n' || t.id === 'e-first') rebuildParcels();
   if (t.id === 'e-date' && $('#e-first') && !$('#e-first').dataset.touched) { $('#e-first').value = addDays(t.value, 28); rebuildParcels(); }
   if (t.id === 'e-first') t.dataset.touched = '1';
@@ -917,6 +974,10 @@ A.saveEntry = () => {
   const ctx = S.entryCtx || {}, e = ctx.entry, r = ctx.receipt;
   const supplier = S.data.suppliers.find(x => x.id === $('#e-sup').value); if (!supplier) return toast('Escolha o fornecedor', 'err');
   const date = $('#e-date').value; if (!date) return toast('Informe a data', 'err');
+  if (!e) {
+    const pend = $$('#e-items .item').find(r => r.dataset.pending === '1' && $('.it-name', r).value.trim());
+    if (pend) return toast(`Confira "${$('.it-name', pend).value.trim()}": é o mesmo produto já cadastrado ou é novo?`, 'err');
+  }
   const items = e ? (e.items || []) : readItems();
   const itemsSum = items.reduce((a, i) => a + i.qty * i.unitCost, 0);
   let total = parseMoney($('#e-total').value); if (!total && itemsSum > 0) total = r2(itemsSum);
@@ -936,12 +997,24 @@ A.saveEntry = () => {
     if (Math.abs(sum - total) > 0.05) return toast(`Parcelas somam ${brl(sum)}, diferente do total ${brl(total)}`, 'err');
   }
   const id = uid(), now = new Date().toISOString();
+  const addStock0 = $('#e-addstock')?.checked, newProds = new Map();
+  items.forEach(it => {
+    if (it.productId) return;
+    const ex = exactProduct(it.name, supplier.id);
+    if (ex) { it.productId = ex.id; return; }
+    const k = norm(it.name); let np = newProds.get(k);
+    if (!np) { np = { id: uid(), code: '', name: it.name.trim(), unit: 'un', supplierId: supplier.id, cost: 0, prevCost: 0, price: 0, minStock: 0, targetStock: 0, stock: addStock0 ? 0 : null, targetMargin: null, active: true, costHistory: [], createdFrom: 'nota' }; newProds.set(k, np); }
+    if (it.unitCost > 0) { np.cost = it.unitCost; np.lastCostDate = date; np.costHistory = [...np.costHistory, { date, cost: it.unitCost, supplierId: supplier.id }]; }
+    if (addStock0) { np.stock = r2((np.stock || 0) + it.qty); np.stockDate = todayISO(); }
+    it.productId = np.id;
+  });
   const photoIds = r ? photoIdsOf(r) : (S.entryPhoto ? [id] : []);
   const entry = { ...base, payment: pay, items, receiptId: r?.id || null, photoId: photoIds[0] || null, photoIds, createdAt: now, ...(pay === 'avista' ? { paidAt: date } : {}) };
   ops.push({ t: 'set', coll: 'entries', id, data: entry });
   parcels.forEach((p, i) => ops.push({ t: 'set', coll: 'bills', id: uid() + i, data: { entryId: id, supplierId: supplier.id, supplierName: supplier.name, invoiceNo: base.invoiceNo, dueDate: p.date, amount: p.amount, parcel: `${i + 1}/${parcels.length}`, status: 'aberto', ddaOk: false, createdAt: now } }));
   if (!r && S.entryPhoto) ops.push({ t: 'set', coll: 'receiptPhotos', id, data: { data: S.entryPhoto, createdBy: S.user.uid, createdAt: now } });
   if (r) ops.push({ t: 'set', coll: 'receipts', id: r.id, data: { status: 'lancado', entryId: id, launchedAt: now } });
+  newProds.forEach(np => ops.push({ t: 'set', coll: 'products', id: np.id, data: np }));
   // custos e estoque dos produtos
   const addStock = $('#e-addstock')?.checked, upd = new Map();
   items.forEach(it => {
@@ -954,10 +1027,10 @@ A.saveEntry = () => {
     if (addStock) { p.stock = r2((parseMoney(p.stock) || 0) + it.qty); p.stockDate = todayISO(); }
     upd.set(it.productId, p);
   });
-  upd.forEach(p => ops.push({ t: 'set', coll: 'products', id: p.id, data: { cost: p.cost, prevCost: p.prevCost ?? 0, lastCostDate: p.lastCostDate || null, costHistory: p.costHistory || [], stock: p.stock ?? null, stockDate: p.stockDate || null } }));
+  upd.forEach(p => ops.push({ t: 'set', coll: 'products', id: p.id, data: { supplierId: p.supplierId || supplier.id, cost: p.cost, prevCost: p.prevCost ?? 0, lastCostDate: p.lastCostDate || null, costHistory: p.costHistory || [], stock: p.stock ?? null, stockDate: p.stockDate || null } }));
   save(DB.batch(ops)); closeModal();
   const ups = [...upd.values()].filter(p => p.prevCost > 0 && p.cost > p.prevCost * 1.001).length;
-  toast('Recebimento lançado' + (parcels.length ? ` com ${parcels.length} boleto(s)` : '') + (ups ? ` · ${ups} custo(s) em alta` : ''));
+  toast('Recebimento lançado' + (parcels.length ? ` com ${parcels.length} boleto(s)` : '') + (newProds.size ? ` · ${newProds.size} produto(s) novo(s) cadastrado(s)` : '') + (ups ? ` · ${ups} custo(s) em alta` : ''));
 };
 A.delEntry = () => {
   const e = S.entryCtx?.entry; if (!e) return;
